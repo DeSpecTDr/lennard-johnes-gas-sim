@@ -4,13 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy_egui = { version = "0.32", default-features = false, features = [
+bevy_egui = { version = "0.33.0", default-features = false, features = [
   "render",
   "default_fonts",
 ] }
 bevy_framepace = "0.18.0"
-egui_plot = "0.30.0"
-rand = "0.8.5"
+egui_plot = "0.31.0"
+itertools = "0.14.0"
+rand = "0.9.0"
+rand_distr = "0.5.1"
 rayon = "1.10.0"
 thread_local = "1.1.8"
 
