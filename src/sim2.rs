@@ -38,14 +38,13 @@ impl SimController {
 
     pub fn prepare(&mut self) {
         let sim = &self.params;
-        let mut state = &mut self.state;
+        let state = &mut self.state;
 
         // TODO: check if maxwell-like
 
         let (p_e, _) = step(sim, state, true);
         let e0 = state.k_e() + p_e;
-        let e = e0;
-        println!("i: {} e: {} ({})", state.i, e, state.T());
+        println!("i: {} e: {} ({})", state.i, e0, state.T());
 
         let mut prev_e = 0.;
         let mut avg_e = crate::utils::SlidingMean::new(5);
@@ -108,6 +107,10 @@ impl SimController {
 
     pub fn get_t(&self) -> f32 {
         self.state.i as f32 * self.params.dt
+    }
+
+    pub fn rho(&self) -> f32 {
+        self.params.n as f32 * self.params.size.powi(-3)
     }
 
     pub fn save_ovito(&self, p: impl AsRef<Path>) {

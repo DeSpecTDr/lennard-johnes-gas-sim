@@ -33,7 +33,7 @@ impl Hist {
     }
 
     fn n(&self) -> u32 {
-        self.arr.iter().sum()
+        self.arr[..self.arr.len()-1].iter().sum()
     }
 
     fn add(&mut self, x: f32) {
@@ -53,20 +53,20 @@ impl Hist {
 
     fn log(&self) -> Vec<f32> {
         let n = self.n() as f32;
-        self.arr.iter().map(|&x| (x as f32 / n).ln()).collect()
+        self.arr[..self.arr.len()-1].iter().map(|&x| (x as f32 / n).ln()).collect()
     }
 
     fn val(&self) -> Vec<f32> {
         let n = self.n() as f32;
-        self.arr.iter().map(|&x| x as f32 / n).collect()
+        self.arr[..self.arr.len()-1].iter().map(|&x| x as f32 / n).collect()
     }
 
     fn bins(&self) -> Vec<f32> {
-        (0..self.arr.len()).map(|x| (x as f32 + 0.5) * self.size).collect()
+        (0..self.arr.len()-1).map(|x| (x as f32 + 0.5) * self.size).collect()
     }
 
     fn raw(&self) -> Vec<u32> {
-        self.arr.clone()
+        self.arr[..self.arr.len()-1].to_vec()
     }
 }
 
@@ -135,7 +135,7 @@ impl Plot {
             mi = np.min(xx)
             ma = np.max(xx)
             mima = 0.05 * (ma - mi)
-            xxx = np.array([mi - mima, ma + mima])
+            xxx = np.array([-b/k, ma + mima])
             yyy = k * xxx + b
 
             plt.plot(xxx, yyy)
@@ -170,16 +170,18 @@ impl Plot {
 // }
 
 fn main() {
-    let mut sim = SimController::new(Sim {
-        n_row: 10,
-        dt: 0.001,
-        temp0: 1.0,
-        ..Default::default()
-    });
-    println!("T: {}", sim.state.T());
-    sim.prepare();
-    println!("T: {}", sim.state.T());
-    sim.save("gas.bin");
+    // let mut sim = SimController::new(Sim {
+    //     n_row: 10,
+    //     // dt: 0.001,
+    //     temp0: 1.0,
+    //     ..Default::default()
+    // });
+    // println!("T: {}", sim.state.T());
+    // sim.prepare();
+    // println!("T: {}", sim.state.T());
+    // sim.prepare();
+    // println!("T: {}", sim.state.T());
+    // sim.save("gas.bin");
     // let mut sim = SimController::load("test.bin");
     // println!("T: {}", sim.state.T());
 
@@ -187,13 +189,24 @@ fn main() {
 
     // let sim = SimController::load("test.bin");
     // sim.save_ovito("test.xyz");
+    // pppp();
+    // part1();
+
+    // let mut sim = SimController::load("test.bin");
+    // println!("{}", sim.params.n); //((sim.state.k_e() * 2.0) / sim.params.n as f32).sqrt());
+    // println!("rho: {}", sim.rho());
+    // println!("t: {}", sim.state.T());
+
+    // rdf(&mut sim);
+
+    // part2();
 }
 
 fn pppp() {
-    let mut sim = SimController::load("test.bin");
-    let mut x2s = vec![Kahan::<f32>::zero(); 200];
-    let mut v0s_sum = vec![Kahan::<f32>::zero(); 200];
-    let l = 30;
+    let mut sim = SimController::load("gas.bin");
+    let mut x2s = vec![Kahan::<f32>::zero(); 1000];
+    let mut v0s_sum = vec![Kahan::<f32>::zero(); 1000];
+    let l = 100;
     for i in 0..l {
         println!("i: {i}");
         sim.state.reset_x2();
@@ -218,77 +231,117 @@ fn pppp() {
 
     let ts: Vec<f32> =
         (0..x2s.len()).map(|x| x as f32 * sim.params.dt).collect();
-    let x2s: Vec<f32> = x2s.iter().map(|x| x.sum() / l as f32 / sim.params.n as f32).collect();
+    let x2s: Vec<f32> =
+        x2s.iter().map(|x| x.sum() / l as f32 / sim.params.n as f32).collect();
     let v0s_sum: Vec<f32> =
         v0s_sum.iter().map(|x| x.sum() / l as f32).collect();
-    let plt = Plot::new();
-    plt.plot(&ts, &x2s);
-    plt.xlabel("t");
-    plt.ylabel("r^2");
-    plt.save("r2t_1.png");
-    plt.plot(&ts, &v0s_sum);
-    plt.xlabel("t");
-    plt.ylabel("v(t)*v(0)");
-    plt.save("test2.png");
+    println!(
+        "Diff coef vtv0: {}",
+        v0s_sum.iter().copied().ksum() / 3.0 * sim.params.dt
+    );
+
+    println!("v: {}", (sim.state.k_e() * 2.0).sqrt());
+
+    python! {
+        import numpy as np
+        x = 'ts
+        y = 'x2s
+        z = 'v0s_sum
+        np.savetxt("aa1.txt", np.array(x))
+        np.savetxt("bb1.txt", np.array(y))
+        np.savetxt("cc1.txt", np.array(z))
+    }
+    // let plt = Plot::new();
+    // plt.plot(&ts, &x2s);
+    // plt.xlabel("t");
+    // plt.ylabel("r^2");
+    let (k, _) = plt.fit(&ts, &x2s, 20);
+    println!("Diffusion coef: {}", k / 6.0);
+    // plt.save("r2t_gas.svg");
+    // plt.plot(&ts, &v0s_sum);
+    // plt.xlabel("t");
+    // plt.ylabel("v(t)*v(0)");
+    // plt.save("vtv0_gas.svg");
 
     // rdf(&mut sim);
 }
 
 fn part2() {
-    let mut sim = SimController::new(Sim::default());
+    let mut sim = SimController::load("gas.bin");
     let n = sim.params.n as f32;
     let irq = sim.state.T() * 3.0; // v^2 / n
-    let mut h = Hist::new(2.0 * irq * n.powf(-1. / 3.));
-    sim.state.vs.iter().for_each(|x| h.add(x.x.powi(2)));
-    let plt = Plot::new();
-    plt.plot(&h.bins(), &h.log());
-    plt.save("test.png");
+    // let mut h = Hist::new(2.0 * irq * n.powf(-1. / 3.));
+    // sim.state.vs.iter().for_each(|x| h.add(x.x.powi(2)));
+    // let plt = Plot::new();
+    // plt.plot(&h.bins(), &h.log());
+    // plt.save("test.png");
 
-    sim.prepare();
+    // sim.prepare();
     let mut h = Hist::new(2.0 * irq * n.powf(-1. / 3.));
-    for _i in 0..10000 {
-        sim.step(false);
-        sim.state.vs.iter().for_each(|x| h.add(x.x.powi(2)));
+    for i in 0..100 {
+        println!("t: {i}");
+        for _i in 0..1000 {
+            sim.step(false);
+            sim.state.vs.iter().for_each(|x| h.add(x.length_squared()));
+        }
     }
     let plt = Plot::new();
     plt.plot(&h.bins(), &h.log());
-    plt.save("test1.png");
+    plt.xlabel("$v^2$");
+    plt.ylabel("$\\ln n$");
+    plt.save("MAX_gas.svg");
 }
 
 fn part1() {
-    let mut sim = SimController::new(Sim::default());
+    let mut sim = SimController::load("gas.bin");
+    let (p_e, _) = sim.step(true);
+    let e0 = p_e + sim.state.k_e();
     println!("T0: {}", sim.state.T());
     let mut Ts = vec![];
     let mut ps1 = vec![];
-    let mut ps2 = vec![];
-    let mut ps3 = vec![];
+    // let mut ps2 = vec![];
+    // let mut ps3 = vec![];
     let mut es = vec![];
     let mut ts = vec![];
-    for i in 0..2 {
+    let ll = 20;
+    let mut e = crate::utils::SlidingMean::new(ll);
+    let mut t = crate::utils::SlidingMean::new(ll);
+    let mut p = crate::utils::SlidingMean::new(ll);
+    for i in 0..20 {
         println!("t: {i}");
         for _ in 0..1000 {
             let (p_e, _) = sim.step(true);
-            let e = p_e + sim.state.k_e();
-            let p = sim.state.p();
-            ps1.push(p.x);
-            ps2.push(p.y);
-            ps3.push(p.z);
-            es.push(e);
-            Ts.push(sim.state.T());
+            e.add2(p_e + sim.state.k_e());
+            p.add2(sim.state.p().length());
+            t.add2(sim.state.T());
+            ps1.push(p.avg);
+            // ps2.push(p.y);
+            // ps3.push(p.z);
+            es.push(e.avg / e0 - 1.);
+            Ts.push(t.avg);
             ts.push(sim.get_t());
         }
     }
 
     let plt = Plot::new();
     plt.plot(&ts, &es);
-    plt.save("test.png");
+    plt.xlabel("t");
+    plt.ylabel("$E_{total}$");
+    plt.save("E_gas.svg");
 
     plt.plot(&ts, &Ts);
+    plt.xlabel("t");
+    plt.ylabel("T");
+    plt.save("T_gas.svg");
+
+    plt.plot(&ts, &ps1);
+    plt.xlabel("t");
+    plt.ylabel("p");
+    plt.save("P_gas.svg");
 
     // plt.plot(&ts, &ps1);
     // plt.plot(&ts, &ps2);
     // plt.plot(&ts, &ps3);
-    plt.save("test1.png");
 }
 
 fn rdf(sim: &mut SimController) {
@@ -387,5 +440,5 @@ fn rdf(sim: &mut SimController) {
     c.ylabel("g(r)");
     // c.show();
 
-    c.save("gr_1.png");
+    c.save("rdf_solid.svg");
 }
