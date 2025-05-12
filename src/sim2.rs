@@ -1,21 +1,26 @@
 // TODO: hooks for calc
 
 use core::f32;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    fs::File,
+    io::{BufReader, BufWriter},
+    path::Path,
+};
 
 use average::{Estimate, Variance};
-use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin, egui};
-use egui_plot::{PlotPoint, PlotPoints};
+use glam::{IVec3, Vec3};
+// use bevy::prelude::*;
+// use bevy_egui::{EguiContexts, EguiPlugin, egui};
+// use egui_plot::{PlotPoint, PlotPoints};
 use itertools::izip;
 use rayon::prelude::*;
 
+use crate::utils::EasySum;
+
 const CUTOFF: f32 = 2.5; // 4
 
-const N_BARS: usize = 20;
-const BARS_S: f64 = 20.0;
-
-#[derive(Resource)]
+// #[derive(Resource)]
 pub struct SimController {
     pub params: Sim,
     pub state: SimState,
@@ -37,22 +42,30 @@ impl SimController {
 
         // TODO: check if maxwell-like
 
-        let mut i = 1;
-        let prev_e: f32 = 0.0;
         let (p_e, _) = step(sim, state, true);
         let e0 = state.k_e() + p_e;
         let e = e0;
-        println!("i: {} e: {e}", state.i);
+        println!("i: {} e: {} ({})", state.i, e, state.T());
 
         let mut prev_e = 0.;
         let mut avg_e = crate::utils::SlidingMean::new(5);
+
+        let mut nvt = true;
+
         loop {
             // let n = i * 100;
             // let mut e = 0.;
             let mut e = crate::utils::Mean::new();
-            for _ in 0..500 {
+            for _ in 0..5000 {
                 let (p_e, _) = step(sim, state, true);
                 // e += p_e + state.k_e();
+
+                if nvt {
+                    let lambda = (1.
+                        + sim.dt / sim.tau * (sim.temp0 / state.T() - 1.))
+                        .sqrt();
+                    state.vs.iter_mut().for_each(|v| *v *= lambda);
+                }
                 e.add(p_e + state.k_e());
             }
             avg_e.add(e.avg);
@@ -61,16 +74,31 @@ impl SimController {
 
             // println!("i: {} e: {} mi: {} ma: {}", state.i, e.avg, e.min,
             // e.max);
-            println!("i: {} e: {} ({})", state.i, avg_e.avg, avg_e.calc());
+            let T = state.T();
+            println!("i: {} e: {} ({})", state.i, avg_e.avg, T);
             // let (p_e, _) = step(sim, state, true);
             // let e = e.mean() as f32;
             // let e = p_e + state.k_e();
 
+            let dT = (T - sim.temp0).abs() / sim.temp0;
+
             if (prev_e - avg_e.avg).abs() / avg_e.avg < 0.0001 {
-                break;
+                if nvt {
+                    nvt = false;
+                } else {
+                    break;
+                }
             }
+
+            if dT < 0.05 {
+                nvt = false;
+            }
+
+            if dT > 0.1 {
+                nvt = true;
+            }
+
             prev_e = avg_e.avg;
-            i += 1;
         }
     }
 
@@ -82,75 +110,99 @@ impl SimController {
         self.state.i as f32 * self.params.dt
     }
 
-    pub fn simple_sim(&mut self) {
-        // let sim = &self.params;
-        // let mut state = &mut self.state;
+    pub fn save_ovito(&self, p: impl AsRef<Path>) {
+        use std::io::Write;
 
-        // if sim.substeps > 0 {
-        //     for _ in 1..sim.substeps {
-        //         step(sim, state, false);
+        let mut writer = BufWriter::new(File::create(p.as_ref()).unwrap());
+        let s = self.params.size;
+        let half = -s / 2.;
+        writeln!(
+            writer,
+            "{}\nLattice=\"{} 0 0 0 {} 0 0 0 {}\" Origin=\"{} {} {}\" \
+             Properties=pos:R:3:velo:R:3 Time = {}",
+            self.params.n,
+            s,
+            s,
+            s,
+            half,
+            half,
+            half,
+            self.get_t(),
+        )
+        .unwrap();
 
-                // let vels0 = &mut stats.vels0;
-                // if vels0.len() == vels0.capacity() {
-                //     vels0.pop_front();
-                // }
-                // vels0.push_back(state.vs.clone());
-            // }
-            // let (p_e, pressure) = step(sim, state, true);
-            // let v = &mut stats.sim_stat;
-            // let t = v.back().map(|x| x.t).unwrap_or(0.0) + sim.target_dt;
-            // // stats.sim_time += sim.target_dt as f64;
-            // // let t = stats.sim_time;
-            // let k_e: f32 = (state
-            //     .vs
-            //     .iter()
-            //     .map(|x| x.length_squared() as f64)
-            //     .sum::<f64>()
-            //     / 2.0) as f32;
-            // let imp: f32 = state.vs.iter().sum::<Vec3>().length();
-            // if v.len() == v.capacity() {
-            //     v.pop_front();
-            // }
-            // let dx2 = state.x2s.iter().map(|x|
-            // x.length_squared()).sum::<f32>()     / sim.n as f32;
-            // v.push_back(Stat { t, k_e, p_e, imp, pressure, dx2 });
+        for (x, v) in izip!(&self.state.xs, &self.state.vs) {
+            writeln!(writer, "{} {} {} {} {} {}", x.x, x.y, x.z, v.x, v.y, v.z)
+                .unwrap();
+        }
 
-            // let vels = &mut stats.vels;
-            // if vels.len() == vels.capacity() {
-            //     vels.pop_front();
-            // }
+        // writer
+    }
 
-            // let mut vs: Vec<f32> =
-            //     state.vs.iter().map(|x| x.x.powi(2)).collect();
-            // vs.sort_unstable_by(|a, b| a.total_cmp(b));
-            // // let s = BARS_S as f32;
-            // let s = vs.iter().sum::<f32>() / sim.n as f32 / 2.0;
-            // let mut bars: Vec<(f32, f32)> = Vec::new();
-            // let mut it = vs.iter();
-            // 'a: for i in 0..N_BARS {
-            //     let mut c = 0;
-            //     for v in it.by_ref() {
-            //         if *v > (i + 1) as f32 * s {
-            //             break;
-            //         }
-            //         c += 1;
-            //     }
-            //     let lnc = if c == 0 { 0.0 } else { (c as f32).ln() };
-            //     bars.push((s * i as f32, lnc));
-            // }
-            // vels.push_back(bars.into_boxed_slice());
+    pub fn save(&self, p: impl AsRef<Path>) {
+        let save = SaveSim {
+            params: self.params.clone(),
+            i: self.state.i,
+            xs: self.state.xs.iter().map(|x| x.to_array()).collect(),
+            vs: self.state.vs.iter().map(|x| x.to_array()).collect(),
+        };
 
-            // stats.i += sim.substeps;
-        // }
+        let mut writer = BufWriter::new(File::create(p.as_ref()).unwrap());
+
+        let nbytes = bincode::encode_into_std_write(
+            save,
+            &mut writer,
+            bincode::config::standard(),
+        )
+        .unwrap();
+
+        println!(
+            "saved {} kB to {:?}",
+            nbytes / 1024,
+            p.as_ref().file_name().unwrap()
+        );
+    }
+
+    pub fn load(p: impl AsRef<Path>) -> Self {
+        let mut reader = BufReader::new(File::open(p.as_ref()).unwrap());
+        let save: SaveSim = bincode::decode_from_std_read(
+            &mut reader,
+            bincode::config::standard(),
+        )
+        .unwrap();
+        let n = save.params.n;
+        let n_spacial = save.params.n_spacial;
+        Self {
+            params: save.params,
+            state: SimState {
+                i: save.i,
+                xs: save.xs.into_iter().map(Vec3::from).collect(),
+                vs: save.vs.into_iter().map(Vec3::from).collect(),
+                fs: vec![Vec3::ZERO; n as usize].into_boxed_slice(),
+                x2s: vec![Vec3::ZERO; n as usize].into_boxed_slice(),
+                spacial_lookup: vec![(0, 0); n as usize].into_boxed_slice(),
+                start_indicies: vec![u32::MAX; n_spacial as usize]
+                    .into_boxed_slice(),
+            },
+        }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, bincode::Encode, bincode::Decode)]
+struct SaveSim {
+    params: Sim,
+    i: i32,
+    xs: Box<[[f32; 3]]>,
+    vs: Box<[[f32; 3]]>,
+}
+
+#[derive(Clone, bincode::Encode, bincode::Decode)]
 pub struct Sim {
     pub n_row: u32,
     pub size: f32,
     pub dt: f32,
     pub temp0: f32,
+    pub tau: f32,
     pub disable_speed: bool,
     pub ignore_cells: bool,
 
@@ -166,10 +218,11 @@ impl Default for Sim {
     fn default() -> Self {
         let mut s = Self {
             // n_row: 8,
-            n_row: 15,
+            n_row: 14,
             size: 15.0,
             dt: 0.005,
             temp0: 1.0,
+            tau: 0.3,
             disable_speed: false,
             ignore_cells: false,
 
@@ -179,7 +232,7 @@ impl Default for Sim {
             n_grid: 0,
             half_dt: 0.0,
         };
-        s.update();
+        // s.update();
         s
     }
 }
@@ -204,7 +257,7 @@ impl Sim {
             self.n_grid = n_grid as u32;
             // warn!("grid size: {}", self.grid);
         }
-        warn!("grid size: {}", self.grid);
+        println!("grid size: {}", self.grid);
 
         if self.n_spacial == 0 {
             self.n_spacial = self.n_grid.pow(3);
@@ -233,7 +286,7 @@ impl SimState {
         };
         Self {
             i: 0,
-            xs: (0..n).map(|i| gen_point(i, sim)).collect(),
+            xs: (0..n).map(|i| gen_point(i, sim.n_row, sim.size)).collect(),
             vs: {
                 let mut vs: Box<[Vec3]> = (0..n)
                     .map(|_| {
@@ -247,7 +300,7 @@ impl SimState {
 
                 let imp = vs.iter().sum::<Vec3>() / n as f32;
                 vs.iter_mut().for_each(|x| *x -= imp);
-                let v2sum: f32 = vs.iter().map(|x| x.length_squared()).sum();
+                let v2sum: f32 = vs.iter().map(|x| x.length_squared()).ksum();
                 let v2target = sim.temp0 * 3.0 * sim.n as f32;
                 let factor = (v2target / v2sum).sqrt();
                 vs.iter_mut().for_each(|x| *x *= factor);
@@ -263,8 +316,9 @@ impl SimState {
     }
 
     pub fn k_e(&self) -> f32 {
-        (self.vs.iter().map(|x| x.length_squared() as f64).sum::<f64>() / 2.0)
-            as f32
+        // let a = (self.vs.iter().map(|x| x.length_squared() as
+        // f64).sum::<f64>() / 2.0)     as f32;
+        self.vs.iter().map(|x| x.length_squared()).ksum() / 2.0
     }
 
     #[allow(non_snake_case)]
@@ -273,21 +327,29 @@ impl SimState {
     }
 
     pub fn p(&self) -> Vec3 {
-        self.vs.iter().sum::<Vec3>()
+        self.vs.ksum()
+    }
+
+    pub fn reset_x2(&mut self) {
+        self.x2s.iter_mut().for_each(|x| *x = Vec3::ZERO);
     }
 }
 
-fn gen_point(i: u32, sim: &Sim) -> Vec3 {
-    let s = sim.n_row;
+pub fn gen_point(i: u32, n_row: u32, size: f32) -> Vec3 {
+    let s = n_row;
     let half = (s - 1) as f32 / 2.;
 
+    let xi = i / s / s;
+    let off: f32 = (xi % 2) as f32 * 0.5; // correction for high density
+
     let x = Vec3::new(
-        (i / s / s) as f32 - half,
-        (i / s % s) as f32 - half,
-        (i % s) as f32 - half,
+        xi as f32 - half,
+        (i / s % s) as f32 - half + off,
+        (i % s) as f32 - half + off,
     ) / s as f32
         * 2.;
-    x * sim.size / 2.0
+    let x = x * size / 2.0;
+    x - (x / size * 2.0).trunc() * size
 }
 
 fn get_cell(x: Vec3, sim: &Sim) -> IVec3 {
@@ -310,9 +372,6 @@ fn get_key(x: IVec3, sim: &Sim) -> u32 {
     hash % sim.n_spacial
 }
 
-const START: i32 = 200;
-const ITERS: i32 = 1000;
-
 fn step(sim: &Sim, state: &mut SimState, calc_stats: bool) -> (f32, f32) {
     let SimState { i, xs, vs, fs, x2s, spacial_lookup, start_indicies } = state;
     *i += 1;
@@ -323,7 +382,7 @@ fn step(sim: &Sim, state: &mut SimState, calc_stats: bool) -> (f32, f32) {
         *x2 += dx;
         *x -= (*x / sim.size * 2.0).trunc() * sim.size;
         if !x.is_finite() {
-            warn!("nan/inf detected");
+            println!("nan/inf detected");
         }
     }
 

@@ -1,4 +1,9 @@
 /target
 /assets
 *.png
+*.bin
 /lammps
+*.xyz
+*.pdf
+*.svg
+*.txt

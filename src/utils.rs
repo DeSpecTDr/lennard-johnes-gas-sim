@@ -1,5 +1,8 @@
 use std::collections::VecDeque;
 
+use accurate::{sum::Kahan, traits::SumAccumulator};
+use glam::Vec3;
+
 pub struct Mean {
     pub avg: f32,
     pub min: f32,
@@ -55,14 +58,32 @@ impl SlidingMean {
     }
 
     pub fn calc(&self) -> f32 {
-        use accurate::traits::*;
+        self.arr.iter().copied().ksum() / self.arr.len() as f32
+    }
+}
 
-        // self.arr.iter().sum::<f32>() / self.arr.len() as f32
+pub trait EasySum<F> {
+    fn ksum(self) -> F;
+}
 
-        self.arr
-            .iter()
-            .copied()
-            .sum_with_accumulator::<accurate::sum::Kahan<_>>()
-            / self.arr.len() as f32
+impl<I> EasySum<f32> for I
+where
+    I: IntoIterator<Item = f32>,
+{
+    fn ksum(self) -> f32 {
+        Kahan::<f32>::zero().absorb(self).sum()
+    }
+}
+
+impl EasySum<Vec3> for &[Vec3] {
+    fn ksum(self) -> Vec3 {
+        let zero = Kahan::<f32>::zero();
+        Vec3::from(
+            self.iter()
+                .fold([zero, zero, zero], |acc, x| {
+                    [acc[0] + x.x, acc[1] + x.y, acc[2] + x.z]
+                })
+                .map(|x| x.sum()),
+        )
     }
 }

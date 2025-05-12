@@ -1,338 +1,391 @@
-#![allow(unused)]
+use std::{
+    ops::Deref,
+    sync::{RwLock, atomic::AtomicU32},
+};
 
-use core::f32;
-use std::collections::VecDeque;
-
-use bevy::prelude::*;
-use bevy_egui::{EguiContexts, EguiPlugin, egui};
-use bevy_playground::sim;
-use egui_plot::{PlotPoint, PlotPoints};
+use accurate::{
+    dot::Dot2,
+    sum::{Kahan, traits::*},
+};
+use glam::Vec3;
+// use bevy::{math::Vec3, utils::default};
+use inline_python::{Context, python};
 use itertools::izip;
-use ops::FloatPow;
-use rayon::prelude::*;
-use sim::SimController;
+use nalgebra as na;
+use rayon::iter::{
+    IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator,
+};
+use utils::EasySum;
 
-const DRAW: bool = true;
-const DRAW_MESHES: bool = true;
-const RENDER_FPS: f64 = 30.0;
+use crate::sim2::*;
 
-#[derive(Resource)]
-struct Two {
-    sim2: sim::SimController,
+mod sim2;
+mod utils;
+
+struct Hist {
+    pub arr: Vec<u32>,
+    size: f32,
 }
 
-fn main() {
-    // let mut sim2 = sim::SimController::new(sim::Sim { substeps: 20, ..default() });
+impl Hist {
+    fn new(size: f32) -> Self {
+        Self { arr: Vec::new(), size }
+    }
 
-    // sim1.simple_sim();
-    // sim2.simple_sim();
+    fn n(&self) -> u32 {
+        self.arr.iter().sum()
+    }
 
-    // println!("{}", sim1.state.xs.iter().zip(sim2.state.xs.iter()).map(|(x1, x2)| (x2 - x1).length_squared()).sum::<f32>() / sim1.params.n as f32);
+    fn add(&mut self, x: f32) {
+        let i = (x / self.size) as usize;
 
-    let mut app = App::new();
-    app.add_plugins((
-        DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "Simulation".into(),
-                ..default()
-            }),
-            ..default()
-        }),
-        bevy::diagnostic::LogDiagnosticsPlugin::default(),
-        bevy::diagnostic::FrameTimeDiagnosticsPlugin,
-        bevy_framepace::FramepacePlugin,
-        EguiPlugin,
-        bevy_mod_outline::OutlinePlugin,
-        // bevy_framepace::debug::DiagnosticsPlugin,
-    ))
-    .insert_resource(bevy_framepace::FramepaceSettings {
-        limiter: bevy_framepace::Limiter::from_framerate(RENDER_FPS),
-    })
-    .add_systems(Startup, (setup_ui, setup_draw))
-    .add_systems(
-        Update,
-        (
-            draw,
-            orbit_camera, // a
-            do_steps,
-            ui_system
-        ),
-    );
-    // // .add_systems(Update, reset_sim.run_if(resource_changed::<Sim>))
-    // // .add_systems(Update, (simple_sim, reset_on_key, ui_system));
-    app.run();
+        if i + 1 > self.arr.len() {
+            self.arr.resize(i + 1, 0);
+            self.arr[i] = 1;
+        } else {
+            self.arr[i] += 1;
+        }
+    }
+
+    fn extend(&mut self, arr: &[f32]) {
+        arr.iter().for_each(|&x| self.add(x));
+    }
+
+    fn log(&self) -> Vec<f32> {
+        let n = self.n() as f32;
+        self.arr.iter().map(|&x| (x as f32 / n).ln()).collect()
+    }
+
+    fn val(&self) -> Vec<f32> {
+        let n = self.n() as f32;
+        self.arr.iter().map(|&x| x as f32 / n).collect()
+    }
+
+    fn bins(&self) -> Vec<f32> {
+        (0..self.arr.len()).map(|x| (x as f32 + 0.5) * self.size).collect()
+    }
+
+    fn raw(&self) -> Vec<u32> {
+        self.arr.clone()
+    }
 }
 
-fn ui_system(
-    mut contexts: EguiContexts,
-    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
-    sim_ctrl: Res<SimController>,
-    localx: Local<usize>,
-) {
-    let sim = &sim_ctrl.params;
-    let fps = diagnostics
-        .get(&bevy::diagnostic::FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|f| f.average())
-        .unwrap_or(0.);
+struct Plot {
+    ctx: Context,
+}
 
-    let ctx = contexts.ctx_mut();
-    egui::Window::new("Stats").show(ctx, |ui| {
-        let v = sim_ctrl.stats.sim_stat.back().cloned().unwrap_or_default();
-        let temperature = v.k_e * 2.0 / 3.0 / sim.n as f32;
+impl Deref for Plot {
+    type Target = Context;
 
-        ui.label(format!("FPS: {fps:.1}\nIter: {}\nT: {temperature}\nrho: {}", sim_ctrl.state.i, sim.n as f32 / sim.size.powi(3)));
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
 
-        // let sim_stat = &sim_ctrl.stats.sim_stat;
-        let Some(vels) = sim_ctrl.stats.vels.iter().last() else {
-            return;
-        };
+impl Plot {
+    fn new() -> Self {
+        Self {
+            ctx: python! {
+                import numpy as np
+                import matplotlib.pyplot as plt
+                import matplotlib as mpl
+                import scipy.stats
+                mpl.rcParams["figure.autolayout"] = True
+                print(mpl.get_backend())
+                mpl.use("Agg")
 
-        // egui_plot:: Plot::new("maxwell_plot").show(ui, |plot_ui| {
-        //     plot_ui.points(egui_plot::Points::new(vels.iter().map(|x| [x.0 as f64, x.1 as f64]).collect::<Vec<_>>()));
-        // });
+                // fig, axs = plt.subplots(squeeze=False)
+            },
+        }
+    }
 
-        // egui_plot:: Plot::new("r2t").height(400.0).show(ui, |plot_ui| {
-        //     plot_ui.points(egui_plot::Points::new(sim_ctrl.stats.r2t.iter().enumerate().map(|x| [(x.0 as f32 * sim.dt) as f64, *x.1 as f64]).collect::<Vec<_>>()));
-        // });
+    fn save(&self, p: &str) {
+        self.ctx.run(python! {
+            plt.grid()
+            plt.savefig('p), plt.close()
+        });
+    }
 
-        // egui_plot:: Plot::new("v0vt").include_y(1.0).include_y(0.0).height(400.0).show(ui, |plot_ui| {
-        //     let v0 = sim_ctrl.stats.v0vt.first().copied().unwrap_or(0.0);
-        //     plot_ui.points(egui_plot::Points::new(sim_ctrl.stats.v0vt.iter().enumerate().map(|x| [(x.0 as f32 * sim.dt) as f64, (*x.1 / v0) as f64]).collect::<Vec<_>>()));
-        // });
+    fn show(&self) {
+        self.ctx.run(python! {
+            plt.show()
+        });
+    }
 
-        egui_plot:: Plot::new("aaaaa").height(400.0).show(ui, |plot_ui| {
-            plot_ui.points(egui_plot::Points::new(sim_ctrl.stats.diff_x.iter().enumerate().map(|x| [(x.0 as f32 * sim.target_dt) as f64, *x.1 as f64]).collect::<Vec<_>>()));
+    fn plot(&self, x: &[f32], y: &[f32]) {
+        self.ctx.run(python! {
+            plt.plot('x, 'y, "."), plt.show()
+        });
+    }
+
+    fn plot2(&self, x: &[f32], y: &[f32]) {
+        self.ctx.run(python! {
+            plt.plot('x, 'y, ".")
+        });
+    }
+
+    fn fit(&self, x: &[f32], y: &[f32], n: i32) -> (f32, f32) {
+        self.ctx.run(python! {
+            x = 'x
+            y = 'y
+            n = 'n
+            xx = x[-n:]
+            yy = y[-n:]
+            k, b = np.polyfit(xx, yy, 1)
+            mi = np.min(xx)
+            ma = np.max(xx)
+            mima = 0.05 * (ma - mi)
+            xxx = np.array([mi - mima, ma + mima])
+            yyy = k * xxx + b
+
+            plt.plot(xxx, yyy)
         });
 
+        let k = self.ctx.get::<f32>("k");
+        let b = self.ctx.get::<f32>("b");
+        (k, b)
+    }
 
-        // egui_plot::Plot::new("plot")
-        //     .allow_zoom(false)
-        //     .allow_drag(false)
-        //     .allow_scroll(false)
-        //     .legend(egui_plot::Legend::default())
-        //     .include_y(-0.01)
-        //     .include_y(0.01)
-        //     .height(400.0)
-        //     .x_axis_label("simulation time (s)")
-        //     // .include_y(65.0)
-        //     .show_grid(true)
-        //     .show(ui, |plot_ui| {
-        //         plot_line(
-        //             plot_ui,
-        //             "total_energy/total_energy0",
-        //             make_rolling(v, |x| x.p_e + x.k_e, true),
-        //         );
-        //         plot_line(
-        //             plot_ui,
-        //             "impulse (sigma/s)",
-        //             make_rolling(v, |x| x.imp, false),
-        //         );
-        //     });
-        // egui_plot::Plot::new("bar").height(400.0).show(ui, |plot_ui| {
-        //     let mut bars = [0.0; N_BARS];
-        //     stats.vels.iter().for_each(|x| {
-        //         x.iter().zip(bars.iter_mut()).for_each(|(v, s)| {
-        //             *s += v;
-        //         })
-        //     });
+    fn xlabel(&self, label: &str) {
+        self.ctx.run(python! {
+            plt.xlabel('label)
+        });
+    }
 
-        //     let bars = bars
-        //         .iter()
-        //         .enumerate()
-        //         .map(|(i, x)| {
-        //             egui_plot::Bar::new(
-        //                 (0.5 + i as f64) * BARS_S,
-        //                 *x as f64 / stats.vels.len() as f64,
-        //             )
-        //             .width(BARS_S)
-        //         })
-        //         .collect();
-
-        //     plot_ui.bar_chart(egui_plot::BarChart::new(bars));
-
-            // plot_ui.bar_chart(egui_plot::BarChart::new(make_bar_chart(
-            //     &state.vs,
-            // )));
-        // });
-    });
+    fn ylabel(&self, label: &str) {
+        self.ctx.run(python! {
+            plt.ylabel('label)
+        });
+    }
 }
 
-fn do_steps(mut sim_ctrl: ResMut<SimController>) {
-    sim_ctrl.simple_sim();
-}
-
-fn reset_on_key(
-    mut commands: Commands,
-    input: Res<ButtonInput<KeyCode>>,
-    mut sim_ctrl: ResMut<SimController>,
-) {
-    // if input.just_pressed(KeyCode::KeyR) {
-    //     // reset_sim(&mut commands);
-    //     // sim_ctrl.params.update();
-    //     commands.insert_resource(SimState::new(&sim));
-    //     commands.insert_resource(Stats::default());
-    // }
-
-    // if input.just_pressed(KeyCode::KeyD) {
-    //     sim.draw ^= true;
-    // }
-
-    // if input.just_pressed(KeyCode::KeyP) {
-    //     sim.pause ^= true;
-    // }
-}
-
-// fn reset_sim(
-//     // sim: Res<Sim>,
-//     commands: &mut Commands,
-//     // mut query: Query<Entity, With<ParticleMarker>>,
-//     // mut gizmos: Gizmos,
-//     // input: Res<ButtonInput<KeyCode>>,
-// ) {
-//     // if input.just_pressed(KeyCode::KeyR) {
-//     // commands.insert_resource(Stats::default());
-//     // let sim = Sim::default();
-//     // commands.insert_resource(SimState::new(&sim));
-//     // commands.insert_resource(sim);
-//     // }
-//     // for p in &query {
-//     //     commands.entity(p).despawn();
-//     // }
-
-//     // for _ in 0..sim.n {
-//     //     commands.spawn()
-//     // }
-
-//     // query.
-//     // println!("{}", sim.n)
+// fn main() {
+//     let n_row: u32 = 3;
+//     for i in 0..n_row.pow(2) {
+//         println!("{}", gen_point(i, n_row, 1.0))
+//     }
+//     for i in 0..n_row.pow(2) {
+//         println!("{}", gen_point(i + n_row.pow(2), n_row, 1.0))
+//     }
 // }
 
-fn draw(
-    mut commands: Commands,
-    // sim: Res<Context>,
-    sim_ctrl: Res<SimController>,
-    mut query: Query<(Entity, &mut Transform, &ParticleMarker)>,
-    mut gizmos: Gizmos,
-    particle_mesh: Res<ParticleMesh>,
-) {
-    let sim = &sim_ctrl.params;
-    let state = &sim_ctrl.state;
-
-    if DRAW_MESHES {
-        let it = query.iter_mut();
-        if it.len() != sim.n as usize {
-            for p in it {
-                commands.entity(p.0).despawn();
-            }
-            for i in 0..sim.n {
-                use bevy_mod_outline::*;
-                commands.spawn((
-                    Mesh3d(particle_mesh.mesh.clone()),
-                    MeshMaterial3d(particle_mesh.mat.clone()),
-                    ParticleMarker(i as usize),
-                    OutlineVolume {
-                        visible: true,
-                        colour: Color::srgba(1.0, 1.0, 1.0, 1.0),
-                        width: 2.0,
-                    },
-                ));
-            }
-        } else {
-            query.iter_mut().for_each(|(_, mut transform, marker)| {
-                transform.translation = state.xs[marker.0];
-            });
-        }
-    } else {
-        let mean_f =
-            state.fs.iter().map(|x| x.length()).sum::<f32>() / sim.n as f32;
-
-        for (&x, &f) in state.xs.iter().zip(state.fs.iter()) {
-            let ff = ((f.length() / mean_f).powi(2)).tanh() * 0.5 + 0.5;
-            // let c = Color::srgb_from_array(((f + 2.) / 4.).to_array());
-            let c = Color::srgb(ff, ff, ff);
-            gizmos
-                .sphere(Isometry3d::from_translation(x), 0.5, c)
-                .resolution(10);
-        }
-    }
-
-    gizmos.cuboid(
-        Transform::IDENTITY.with_scale(Vec3::splat(sim.size)),
-        Color::WHITE,
-    );
-}
-
-fn setup_ui(mut contexts: EguiContexts) {
-    let ctx = contexts.ctx_mut();
-    ctx.style_mut(|style| {
-        style.text_styles.iter_mut().for_each(|(_text_style, font_id)| {
-            font_id.size = 14.0;
-        });
+fn main() {
+    let mut sim = SimController::new(Sim {
+        n_row: 10,
+        dt: 0.001,
+        temp0: 1.0,
+        ..Default::default()
     });
+    println!("T: {}", sim.state.T());
+    sim.prepare();
+    println!("T: {}", sim.state.T());
+    sim.save("gas.bin");
+    // let mut sim = SimController::load("test.bin");
+    // println!("T: {}", sim.state.T());
+
+    // pppp();
+
+    // let sim = SimController::load("test.bin");
+    // sim.save_ovito("test.xyz");
 }
 
-fn setup_draw(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        Camera3d::default(),
-        // Projection::Orthographic(OrthographicProjection {
-        //     scale: 0.05,
-        //     ..OrthographicProjection::default_3d()
-        // }),
-        Transform::from_xyz(0.0, 50.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y),
-        MyCamera,
-    ));
-
-    let mesh = meshes.add(Sphere::new(0.5).mesh().ico(1).unwrap());
-
-    let c = Color::srgba_u8(124, 144, 255, 255);
-    let mut m = StandardMaterial::from_color(c);
-    // m.unlit = true;
-    let material = materials.add(m);
-
-    commands.spawn((
-        DirectionalLight { shadows_enabled: true, ..default() },
-        Transform::from_xyz(0.0, 2.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    commands.insert_resource(ParticleMesh { mesh, mat: material });
-
-    let sim_ctrl = sim::SimController::new(sim::Sim { ..default() });
-    commands.insert_resource(sim_ctrl);
-}
-
-#[derive(Resource)]
-struct ParticleMesh {
-    mesh: Handle<Mesh>,
-    mat: Handle<StandardMaterial>,
-}
-
-#[derive(Component)]
-struct ParticleMarker(usize);
-
-#[derive(Component)]
-struct MyCamera;
-
-fn orbit_camera(
-    mut camera: Single<&mut Transform, With<MyCamera>>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mouse_motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
-    mouse_scroll: Res<bevy::input::mouse::AccumulatedMouseScroll>,
-) {
-    if mouse_buttons.pressed(MouseButton::Left) {
-        let delta = mouse_motion.delta * -0.02;
-        let (mut yaw, mut pitch, roll) =
-            camera.rotation.to_euler(EulerRot::YXZ);
-        yaw += delta.x;
-        let lim = std::f32::consts::FRAC_PI_2 - 0.01;
-        pitch = (pitch + delta.y).clamp(-lim, lim);
-        camera.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll);
-        camera.translation = Vec3::ZERO
-            - camera.forward()
-                * camera.translation.length()
-                * (1.0 - mouse_scroll.delta.y * 0.1);
+fn pppp() {
+    let mut sim = SimController::load("test.bin");
+    let mut x2s = vec![Kahan::<f32>::zero(); 200];
+    let mut v0s_sum = vec![Kahan::<f32>::zero(); 200];
+    let l = 30;
+    for i in 0..l {
+        println!("i: {i}");
+        sim.state.reset_x2();
+        let v0s = sim.state.vs.clone();
+        for (x2, v0ss) in izip!(&mut x2s, &mut v0s_sum) {
+            *x2 += sim.state.x2s.iter().map(|x| x.length_squared()).ksum();
+            // / (v.length_squared() * v0.length_squared()).sqrt()
+            *v0ss += sim
+                .state
+                .vs
+                .iter()
+                .zip(v0s.iter())
+                .map(|(v, v0)| v.dot(*v0))
+                .ksum()
+                / v0s.len() as f32;
+            sim.step(false);
+        }
+        for _ in 0..10 {
+            sim.step(false);
+        }
     }
+
+    let ts: Vec<f32> =
+        (0..x2s.len()).map(|x| x as f32 * sim.params.dt).collect();
+    let x2s: Vec<f32> = x2s.iter().map(|x| x.sum() / l as f32 / sim.params.n as f32).collect();
+    let v0s_sum: Vec<f32> =
+        v0s_sum.iter().map(|x| x.sum() / l as f32).collect();
+    let plt = Plot::new();
+    plt.plot(&ts, &x2s);
+    plt.xlabel("t");
+    plt.ylabel("r^2");
+    plt.save("r2t_1.png");
+    plt.plot(&ts, &v0s_sum);
+    plt.xlabel("t");
+    plt.ylabel("v(t)*v(0)");
+    plt.save("test2.png");
+
+    // rdf(&mut sim);
+}
+
+fn part2() {
+    let mut sim = SimController::new(Sim::default());
+    let n = sim.params.n as f32;
+    let irq = sim.state.T() * 3.0; // v^2 / n
+    let mut h = Hist::new(2.0 * irq * n.powf(-1. / 3.));
+    sim.state.vs.iter().for_each(|x| h.add(x.x.powi(2)));
+    let plt = Plot::new();
+    plt.plot(&h.bins(), &h.log());
+    plt.save("test.png");
+
+    sim.prepare();
+    let mut h = Hist::new(2.0 * irq * n.powf(-1. / 3.));
+    for _i in 0..10000 {
+        sim.step(false);
+        sim.state.vs.iter().for_each(|x| h.add(x.x.powi(2)));
+    }
+    let plt = Plot::new();
+    plt.plot(&h.bins(), &h.log());
+    plt.save("test1.png");
+}
+
+fn part1() {
+    let mut sim = SimController::new(Sim::default());
+    println!("T0: {}", sim.state.T());
+    let mut Ts = vec![];
+    let mut ps1 = vec![];
+    let mut ps2 = vec![];
+    let mut ps3 = vec![];
+    let mut es = vec![];
+    let mut ts = vec![];
+    for i in 0..2 {
+        println!("t: {i}");
+        for _ in 0..1000 {
+            let (p_e, _) = sim.step(true);
+            let e = p_e + sim.state.k_e();
+            let p = sim.state.p();
+            ps1.push(p.x);
+            ps2.push(p.y);
+            ps3.push(p.z);
+            es.push(e);
+            Ts.push(sim.state.T());
+            ts.push(sim.get_t());
+        }
+    }
+
+    let plt = Plot::new();
+    plt.plot(&ts, &es);
+    plt.save("test.png");
+
+    plt.plot(&ts, &Ts);
+
+    // plt.plot(&ts, &ps1);
+    // plt.plot(&ts, &ps2);
+    // plt.plot(&ts, &ps3);
+    plt.save("test1.png");
+}
+
+fn rdf(sim: &mut SimController) {
+    let n = sim.params.n as f32;
+
+    let irq = sim.params.size / 2.;
+
+    let meas_n = 50;
+
+    let mut h = Hist::new(
+        meas_n as f32
+            * 2.
+            * 4.
+            * irq
+            * ((sim.params.n as f32).powi(6) / 4.).powf(-1. / 3.),
+    ); // 0.01
+    // h.extend(); # 290kk
+    let l = sim.state.xs.len();
+
+    for i in 0..meas_n {
+        println!("rdf {i}/{meas_n}");
+        for _ in 0..10 {
+            sim.step(false);
+        }
+
+        sim.state.xs.iter().enumerate().for_each(|(i, x1)| {
+            for j in 0..(l - i - 1) {
+                if i == j {
+                    continue;
+                }
+                let x2 = sim.state.xs[j];
+
+                let mut dr = x1 - x2;
+                dr -= (dr / sim.params.size).round() * sim.params.size;
+                let r = dr.length_squared();
+                if r < sim.params.size.powi(2) / 28. {
+                    h.add(r.sqrt());
+                }
+            }
+        });
+
+        // for i in 0..l {
+
+        // }
+    }
+    // println!("histn: {}", h.n());
+
+    // let irq = sim.state.vs.iter().map(|x|
+    // x.length_squared()).sum_with_accumulator::<Kahan<_>>() / n; let mut h
+    // = Hist::new(2. * irq * n.powf(-1./3.)); let mut h1 = Hist::new(2. *
+    // irq * n.powf(-1./3.));
+
+    //     let vels = sim.state.vs.iter().map(|x|
+    // x.x.powi(2)).collect::<Vec<_>>(); h1.extend(&vels);
+
+    // for i in 0..100 {
+    //     println!("{i}");
+    //     for _ in 0..100 {
+    //         sim.step(false);
+    //     }
+    //     h.extend(&sim.state.vs.iter().map(|x|
+    // x.x.powi(2)).collect::<Vec<_>>());
+
+    // }
+
+    // let vels = h.log();
+    // let vels1 = h1.log();
+    // let bins = h.bins();
+    // let bins1 = h1.bins();
+
+    // average::Histogram
+
+    let b = h.bins();
+    // let v = h.val();
+
+    let rho = sim.params.n as f32 * sim.params.size.powi(-3);
+
+    let v: Vec<f32> = h
+        .raw()
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| {
+            let gfac = 4. / 3. * std::f32::consts::PI * h.size.powi(3);
+            let vb = gfac * ((3 * i + 3) * i + 1) as f32;
+            let mut g = x as f32 / sim.params.n as f32 / vb / rho;
+            g *= 2.; // twice per particle
+            g /= meas_n as f32;
+            g
+        })
+        .collect();
+
+    let c = Plot::new();
+
+    c.plot(&b, &v);
+    c.xlabel("r");
+    c.ylabel("g(r)");
+    // c.show();
+
+    c.save("gr_1.png");
 }
