@@ -1,0 +1,6 @@
+.direnv/
+build/
+compile_commands.json
+*.nsys-rep
+*.ncu-rep
+src/mainbak.cu
