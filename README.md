@@ -1,11 +1,6 @@
 # multithreaded Lennard Jones gas simulation with spacial hashing
 
-<!-- https://github.com/user-attachments/assets/8b760350-b197-4509-accd-93bdae3795ba -->
+implementation in Rust and CUDA
 
-TODO:
-triple point + critical
+https://github.com/user-attachments/assets/8b760350-b197-4509-accd-93bdae3795ba
 
-average r^2/t
-average v(0)*v(t)
-
-r(x) - r'(x) when dt' = dt/2
